@@ -1,8 +1,23 @@
 # Changelog
 
+## 0.2.1 — 2026-10-17（交接文档本地-only 政策）
+
+### Added
+
+- **交接文档不上传（硬政策）**：交接物（`handoffs/`）只生存在本地文件系统——永不 commit、永不 push、永不上传（远端仓库、云盘、聊天工具都算）；跨机器转移由用户手动拷贝文件夹完成。
+  - `create_handoff.py` 创建交接时自动把 `handoffs/` 写入项目 `.gitignore`（普通 `git add .` 永远带不上交接文档）；发现 `handoffs/` 已被 git 跟踪（含暂存）即 `[WARN]` 并给出补救命令 `git rm -r --cached handoffs`。
+  - `validate_handoff.py` 新增 git 跟踪检测：交接文档被跟踪 → `[WARN]` + 软扣 2 分，绝不静默放行。
+  - 预检 `--check`（只读）同步报告已被跟踪的交接文档。
+- SKILL.md / RESUME_PROMPT / handoff-template 红线统一改为「交接文档永不 commit/push/上传」；用户坚持要上传时说明风险并交还决定权，skill 不代为上传。
+- 通道语义收窄：agent 间唯一通道 = 本地文件夹（移除「GitHub clone」「仓库页面」等上传暗示的表述）。
+
+### Changed
+
+- 用户说「提交/推送」时只针对项目代码，且执行前必须确认 `handoffs/` 已被 `.gitignore` 排除、不在暂存区。
+
 ## 0.2.0 — 2026-10-17（按独立审查报告修复）
 
-依据 [review/orbital-handoff-独立审查报告-2026-10-17.md](review/orbital-handoff-独立审查报告-2026-10-17.md) 与 [review/orbital-handoff-优化建议-2026-10-17.md](review/orbital-handoff-优化建议-2026-10-17.md) 完成 P0/P1 全部修复；回归测试 16 项全绿（`python3 -m unittest discover -s orbital_handoff/scripts/tests`）。
+依据 `review/orbital-handoff-独立审查报告-2026-10-17.md` 与 `review/orbital-handoff-优化建议-2026-10-17.md`（两份文档仅本地保留，不入库）完成 P0/P1 全部修复；回归测试 16 项全绿（`python3 -m unittest discover -s orbital_handoff/scripts/tests`）。
 
 ### Fixed（P0）
 

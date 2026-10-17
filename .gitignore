@@ -8,6 +8,9 @@ handoffs/
 AGENTS.md
 .tmp-handoff-*
 
+# 审查产出（分析报告/优化建议/测试证据）仅本地保留，不入库、不随仓库上传
+review/
+
 # 编辑器
 .vscode/
 .idea/

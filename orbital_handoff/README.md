@@ -2,7 +2,7 @@
 
 跨隔离 AI agent 的项目交接 skill：让仓库自己携带足够的上下文，使任何 agent（无论有无 skill 框架）都能零歧义地接手。
 
-**版本**：0.2.0（见仓库根 CHANGELOG.md）
+**版本**：0.2.1（见仓库根 CHANGELOG.md）
 
 ## 安装
 
@@ -28,3 +28,5 @@
 ## 安全基线
 
 凭证、`.env`、私钥、token 永远不进交接物。`validate_handoff.py` 检出密钥即 BLOCKED（不受分数影响）；`create_handoff.py` 落盘后即时扫描敏感文件并告警。
+
+**交接文档不上传**：交接物（`handoffs/`）只生存在本地文件系统——永不 commit、永不 push、永不上传。`create_handoff.py` 自动把 `handoffs/` 写入项目 `.gitignore` 并对已被 git 跟踪的交接文档告警；`validate_handoff.py` 对被跟踪的交接文档 `[WARN]` + 扣分。跨机器转移由用户手动拷贝文件夹完成。

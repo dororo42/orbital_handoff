@@ -1,14 +1,14 @@
 # orbital_handoff — 审查与项目化
 
-本仓库包含 **orbital_handoff.skill**（跨隔离 agent 项目交接 skill）的完整源码、原始发布包，以及 2026-10-17 的独立代码审查产出。
+本仓库包含 **orbital_handoff.skill**（跨隔离 agent 项目交接 skill）的完整源码与发布包。2026-10-17 的独立代码审查产出仅保存在本地 `review/` 目录（已排除出版本库，不随仓库上传）。
 
-> **当前状态**：审查发现的全部 P0/P1 缺陷已在 **v0.2.0** 修复并通过 16 项回归测试，见 [CHANGELOG.md](CHANGELOG.md)。`orbital_handoff/` 目录即修复后的最新源码；`dist/orbital_handoff.skill` 保留为修复前的原始包（v0.1 存档），`dist/orbital_handoff-0.2.0.skill` 为修复后的发布包。
+> **当前状态**：审查发现的全部 P0/P1 缺陷已在 **v0.2.0** 修复并通过 16 项回归测试；**v0.2.1** 增加「交接文档不上传」硬政策，见 [CHANGELOG.md](CHANGELOG.md)。`orbital_handoff/` 目录即最新源码；`dist/orbital_handoff.skill` 为修复前的原始包（v0.1 存档），`dist/orbital_handoff-0.2.0.skill` / `dist/orbital_handoff-0.2.1.skill` 为对应版本发布包。
 
 ## 目录结构
 
 ```
 .
-├── orbital_handoff/                     # skill 源码（v0.2.0，已修复）
+├── orbital_handoff/                     # skill 源码（v0.2.1）
 │   ├── SKILL.md                         # 主文档：CREATE / RESUME / CHECK 三工作流
 │   ├── README.md                        # 包内说明（安装路径 / 组成 / 安全基线）
 │   ├── references/                      # 档位矩阵 / 交接模板 / 接手核查清单
@@ -16,8 +16,9 @@
 │       └── tests/                       # 回归测试（unittest，16 项，零依赖）
 ├── dist/
 │   ├── orbital_handoff.skill            # 原始 .skill 包（v0.1 存档，未改动）
-│   └── orbital_handoff-0.2.0.skill      # 修复后发布包（与源逐字节一致）
-└── review/
+│   ├── orbital_handoff-0.2.0.skill      # v0.2.0 发布包
+│   └── orbital_handoff-0.2.1.skill      # v0.2.1 发布包（含交接文档不上传政策）
+└── review/                              # 审查产出——仅本地保留，不入库、不随仓库上传
     ├── orbital-handoff-独立审查报告-2026-10-17.md   # 1 阻塞 / 5 重要 / 4 次要 / 5 建议 + 6 亮点
     ├── orbital-handoff-优化建议-2026-10-17.md       # P0/P1/P2 修复路线 + 补丁草图 + 发布清单
     └── evidence-2026-10-17.md                        # 15 项动态测试的实测证据
@@ -47,4 +48,4 @@ python3 orbital_handoff/scripts/check_staleness.py handoffs/*/HANDOFF.md
 
 ## 许可
 
-skill 源码许可随上游发布包；审查文档部分按仓库整体许可处理（建议添加 LICENSE）。
+skill 源码许可随上游发布包（建议添加 LICENSE）。
