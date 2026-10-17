@@ -1,6 +1,6 @@
 ---
 name: orbital_handoff
-version: 0.2.1
+version: 0.2.2
 description: Cross-agent project handoff for isolated AI coding agents (Claude Code, Codex, Cursor, zcode, GLM, etc.) that can only share state through local folders — no shared context, no shared memory, and handoff documents are local-only (never committed, pushed, or uploaded). Use this skill whenever the user wants to 交接/移交/打包项目 hand off a project to another agent, machine, or fresh session; 接手/继承/恢复项目 take over or resume a project from a handoff; create a handoff before context runs out; migrate a project between agents (e.g. Claude Code → Codex → zcode); save session state; or 检查能否交接 check handoff readiness. Generates self-contained handoff kits (HANDOFF.md + agent-neutral AGENTS.md pointer + paste-ready resume prompt) matched to the target agent's capability mode — works even when the target agent has NO skill framework.
 ---
 
@@ -8,7 +8,7 @@ description: Cross-agent project handoff for isolated AI coding agents (Claude C
 
 让相互隔离的 AI agent 之间安全交接正在开发的项目。约束条件：**agent 之间唯一的通道是本地文件夹**——没有共享上下文，没有共享记忆，交接文档也只在本机流转。因此本 skill 的核心思路是：
 
-> **让仓库自己携带足够的上下文，使任何 agent（无论有无 skill 框架）都能零歧义地接手。**
+> **让交接套件自己携带足够的上下文，使任何 agent（无论有无 skill 框架）都能零歧义地接手。**
 
 三条铁律：
 
