@@ -9,11 +9,13 @@ scripts end-to-end (the same scenarios that exposed the 2026-10-17 defects).
 """
 
 import io
+import os
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stdout
 from datetime import datetime
@@ -239,6 +241,355 @@ class StalenessTests(KitTestCase):
         r = run([sys.executable, SCRIPTS / "check_staleness.py",
                  kit / "HANDOFF.md"], self.repo)
         self.assertIn("Level: VERY_STALE", r.stdout)
+
+
+class CredentialRedactionTests(KitTestCase):
+    def test_remote_url_credentials_are_redacted(self):
+        # Regression: a credentialed origin URL used to be copied verbatim
+        # into HANDOFF.md/RESUME_PROMPT.md (Project/位置 fields).
+        run(["git", "remote", "add", "origin",
+             "https://user:ghp_AAAABBBBCCCCDDDDEEEEFFFFGGGG1234@github.com/org/repo.git"],
+            self.repo)
+        kit, out = self.create_kit("leakcheck", "--target", "all")
+        text = (kit / "HANDOFF.md").read_text(encoding="utf-8")
+        self.assertNotIn("ghp_AAAABBBB", text)
+        self.assertNotIn("user:ghp_", text)
+        self.assertIn("https://github.com/org/repo.git", text)
+        self.assertIn("redacted", out)
+        # sanitizer unit behavior
+        self.assertEqual(ch.sanitize_remote_url("https://tok@host/x/y.git"),
+                         "https://host/x/y.git")
+        self.assertEqual(ch.sanitize_remote_url("https://u:p@ss@host/x"),
+                         "https://host/x")
+        self.assertEqual(ch.sanitize_remote_url("git@host:path/repo.git"),
+                         "git@host:path/repo.git")
+        self.assertEqual(ch.sanitize_remote_url(""), "")
+        self.assertEqual(ch.sanitize_remote_url("https://host/x/y.git"),
+                         "https://host/x/y.git")
+
+    def test_git_failure_no_longer_fails_open(self):
+        # The local-only tripwire returned [] on git failure; an unknown
+        # tracking state must warn, never read as clean.
+        kit, _ = self.create_kit("tripwire")
+        self.assertEqual(ch.handoffs_tracked(self.repo), [])
+        broken = self.tmp / "broken"
+        broken.mkdir()
+        (broken / ".git").write_text("garbage", encoding="utf-8")
+        self.assertIsNone(ch.handoffs_tracked(broken))
+
+
+class GitParsingTests(KitTestCase):
+    def test_porcelain_z_handles_unicode_and_arrow_names(self):
+        # Regression: quoted porcelain output produced octal escapes for
+        # non-ASCII paths and truncated rename targets containing " -> ".
+        (self.repo / "文档 文件.md").write_text("x\n", encoding="utf-8")
+        (self.repo / "old.txt").write_text("x\n", encoding="utf-8")
+        run(["git", "add", "-A"], self.repo)
+        run(["git", "mv", "old.txt", "weird -> name.txt"], self.repo)
+        kit, _ = self.create_kit("zparse")
+        text = (kit / "HANDOFF.md").read_text(encoding="utf-8")
+        self.assertNotIn("\\346", text)           # no octal escapes
+        self.assertIn("文档 文件.md", text)        # raw non-ASCII preserved
+        self.assertIn("weird -> name.txt", text)  # rename target intact
+
+    def test_slug_sanitization_never_traverses(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            for s in ("../../etc/passwd", "/abs/path", "..", "中文名", ""):
+                kit = ch.create(self.repo, s, "skill", None, "tester")
+                name = Path(kit).name
+                self.assertNotIn("..", name)
+                self.assertRegex(name, r"^[0-9a-zA-Z-]+$")
+
+
+class ChainPathTests(KitTestCase):
+    def test_continues_from_accepts_doc_path(self):
+        # Regression: the usage string promised dir-or-file, but a path to
+        # HANDOFF.md silently degraded the chain to "首轮交接".
+        k1, _ = self.create_kit("prev")
+        kit, out = self.create_kit(
+            "next", "--target", "skill",
+            "--continues-from", str(k1 / "HANDOFF.md"))
+        self.assertEqual(self.chain_of(kit),
+                         f"handoffs/{k1.name}/HANDOFF.md")
+        self.assertNotIn("not found among active kits", out)
+
+    def test_continues_from_accepts_kit_dir_path(self):
+        k1, _ = self.create_kit("prevdir")
+        kit, _ = self.create_kit("nextdir", "--target", "skill",
+                                 "--continues-from", str(k1))
+        self.assertEqual(self.chain_of(kit),
+                         f"handoffs/{k1.name}/HANDOFF.md")
+
+
+class RollbackTests(KitTestCase):
+    def test_failed_pointer_update_rolls_back_kit(self):
+        # Regression: only SystemExit was caught, so a UnicodeDecodeError from
+        # a non-UTF-8 AGENTS.md leaked an orphan kit that the next create
+        # would treat as the newest chain member.
+        (self.repo / "AGENTS.md").write_bytes(
+            "# AGENTS\n\n中文内容（GBK 编码）\n".encode("gbk"))
+        r = run([sys.executable, SCRIPTS / "create_handoff.py", "gbk",
+                 "--target", "all"], self.repo)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("[ABORT]", r.stdout)
+        self.assertIn("[cleanup]", r.stdout)
+        hd = self.repo / "handoffs"
+        leftovers = [p for p in hd.iterdir() if p.is_dir()] if hd.is_dir() else []
+        self.assertEqual(leftovers, [])
+        # and the next create must not chain to an orphan
+        k2, _ = self.create_kit("after-gbk", "--target", "skill")
+        self.assertIsNone(self.chain_of(k2))
+
+    def test_temp_sweep_spares_fresh_files(self):
+        # Regression: the startup sweep unlinked ANY stray temp file, crashing
+        # a concurrent create that still owned its fresh temp file.
+        hd = self.repo / "handoffs"
+        hd.mkdir(exist_ok=True)
+        fresh = hd / ".tmp-handoff-fresh.md"
+        fresh.write_text("x", encoding="utf-8")
+        old = hd / ".tmp-handoff-old.md"
+        old.write_text("x", encoding="utf-8")
+        two_hours_ago = time.time() - 7200
+        os.utime(old, (two_hours_ago, two_hours_ago))
+        self.create_kit("sweep")
+        self.assertTrue(fresh.exists())
+        self.assertFalse(old.exists())
+
+
+class SecretScanTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="oh-sec-"))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_all_pattern_families_fire(self):
+        samples = {
+            "API key": 'api_key = "0123456789abcdef"',
+            "Password": 'DB_PASSWORD="sup3rs3cret!"',
+            "Secret": "client_secret: '0123456789abcdef0'",
+            "Token": "token = 0123456789abcdef0123456789",
+            "PEM private key": "-----BEGIN RSA PRIVATE KEY-----",
+            "MongoDB URL with password": "mongodb://u:secretpw@host/db",
+            "PostgreSQL URL with password": "postgresql://u:secretpw@h/db",
+            "MySQL URL with password": "mysql://u:secretpw@h/db",
+            "URL with embedded credentials": "https://u:secretpassword@host/x",
+            "Bearer token": "Authorization: Bearer abcdefghijklmnopqrstuvwx",
+            "GitHub PAT": "ghp_" + "a" * 36,
+            "GitHub fine-grained PAT": "github_pat_" + "a" * 22,
+            "OpenAI/Anthropic-style API key": "sk-" + "a" * 40,
+            "Slack token": "xoxb-" + "a" * 20,
+            "Zhipu-style key (id.secret)": "a" * 32 + "." + "b" * 16,
+            "JWT (JSON Web Token)": "eyJ" + "a" * 12 + "." + "b" * 12 + "." + "c" * 6,
+            "AWS access key id": "AKIA" + "2" * 16,
+            "Google API key": "AIza" + "a" * 35,
+        }
+        for desc, sample in samples.items():
+            with self.subTest(desc=desc):
+                matched = [d for pat, d in vh.SECRET_PATTERNS
+                           if re.search(pat, sample, re.IGNORECASE)]
+                self.assertIn(desc, matched)
+
+    def test_unquoted_kv_leak_detected(self):
+        # Regression: `api_key: sk-...` without quotes escaped detection.
+        p = self.tmp / "doc.md"
+        p.write_text("api_key: sk-abcdefghijklmnopqrst\n"
+                     "password: hunter2secret\n", encoding="utf-8")
+        r = vh.validate(str(p))
+        descs = [d for d, _ in r["secrets"]]
+        self.assertIn("API key", descs)
+        self.assertIn("Password", descs)
+
+    def test_redos_is_bounded(self):
+        # Regression: the unbounded credential-URL pattern needed >120 s on a
+        # crafted ~600 KB line; the scan must stay well under seconds.
+        evil = "a" * 4000 + " https://" + "b" * 2000 + ":" + "c" * 2000
+        big = "a" * 100000 + "://" + "b" * 100000 + ":" + "c" * 100000
+        t0 = time.perf_counter()
+        vh.scan_secrets(evil + "\n" + evil)
+        vh.scan_secrets(big)
+        self.assertLess(time.perf_counter() - t0, 5.0)
+
+    def test_undecodable_doc_fails_closed(self):
+        p = self.tmp / "gbk.md"
+        p.write_bytes("secret: 中文密钥内容\n".encode("gbk"))
+        r = vh.validate(str(p))
+        self.assertIn("error", r)
+        self.assertIn("UTF-8", r["error"])
+
+    def test_oversized_doc_is_refused(self):
+        p = self.tmp / "big.md"
+        p.write_text("x" * (vh.MAX_DOC_BYTES + 1), encoding="utf-8")
+        r = vh.validate(str(p))
+        self.assertIn("error", r)
+        self.assertIn("too large", r["error"])
+
+
+class ChainSecurityTests(KitTestCase):
+    def test_chain_read_cannot_escape_project(self):
+        # Regression: 'Continues from' accepted any path on disk and echoed
+        # up to 60 chars of its content — an arbitrary-read vector.
+        secret = self.tmp / "outside-secret.md"
+        secret.write_text("- [ ] planted item for arbitrary read test\n",
+                          encoding="utf-8")
+        cur = self.repo / "handoffs" / "cur"
+        cur.mkdir(parents=True)
+        (cur / "HANDOFF.md").write_text(
+            "# Handoff: cur\n### 交接链\n"
+            "- **Continues from**: `../outside-secret.md`\n", encoding="utf-8")
+        r = vh.validate(str(cur / "HANDOFF.md"))
+        self.assertIsNotNone(r["chain_error"])
+        self.assertIn("escapes the project root", r["chain_error"])
+        self.assertEqual(r["unresolved_from_prev"], [])
+
+    def test_gbk_previous_doc_does_not_crash(self):
+        # Regression: a GBK-encoded predecessor killed validation with a bare
+        # UnicodeDecodeError traceback.
+        prev = self.repo / "handoffs" / "prev"
+        prev.mkdir(parents=True)
+        (prev / "HANDOFF.md").write_bytes(
+            "# prev\n- [ ] GBK未完成条目测试ab\n".encode("gbk"))
+        cur = self.repo / "handoffs" / "cur"
+        cur.mkdir(parents=True)
+        (cur / "HANDOFF.md").write_text(
+            "# Handoff: cur\n### 交接链\n"
+            "- **Continues from**: `handoffs/prev/HANDOFF.md`\n",
+            encoding="utf-8")
+        r = vh.validate(str(cur / "HANDOFF.md"))
+        self.assertIsNone(r["chain_error"])  # lenient decode, no crash
+
+    def test_mentioned_without_outcome_is_flagged(self):
+        prev = self.repo / "handoffs" / "prev"
+        prev.mkdir(parents=True)
+        (prev / "HANDOFF.md").write_text(
+            "# Handoff: prev\n- [ ] migrate config to toml completely\n",
+            encoding="utf-8")
+        cur = self.repo / "handoffs" / "cur"
+        cur.mkdir(parents=True)
+        (cur / "HANDOFF.md").write_text(
+            "# Handoff: cur\n### 交接链\n"
+            "- **Continues from**: `handoffs/prev/HANDOFF.md`\n"
+            "## 当前状态摘要\n\nmigrate config to toml completely 被提及但没有结局。\n",
+            encoding="utf-8")
+        r = vh.validate(str(cur / "HANDOFF.md"))
+        self.assertEqual(r["unresolved_from_prev"], [])
+        self.assertEqual(len(r["mentioned_no_outcome"]), 1)
+
+    def test_outcome_marker_closes_item(self):
+        prev = self.repo / "handoffs" / "prev"
+        prev.mkdir(parents=True)
+        (prev / "HANDOFF.md").write_text(
+            "# Handoff: prev\n- [ ] migrate config to toml completely\n",
+            encoding="utf-8")
+        cur = self.repo / "handoffs" / "cur"
+        cur.mkdir(parents=True)
+        (cur / "HANDOFF.md").write_text(
+            "# Handoff: cur\n### 交接链\n"
+            "- **Continues from**: `handoffs/prev/HANDOFF.md`\n"
+            "## 立即下一步\n\n"
+            "1. migrate config to toml completely\n"
+            "   → 结局: [done 已在上一轮完成并验证]\n",
+            encoding="utf-8")
+        r = vh.validate(str(cur / "HANDOFF.md"))
+        self.assertEqual(r["unresolved_from_prev"], [])
+        self.assertEqual(r["mentioned_no_outcome"], [])
+
+
+class VerdictGateTests(KitTestCase):
+    def test_single_todo_is_not_ready(self):
+        # Regression: one [TODO] landed at exactly 70 → READY, with [FAIL]
+        # lines printed in the very same report.
+        kit, _ = self.create_kit("onetodo")
+        text = (kit / "HANDOFF.md").read_text(encoding="utf-8")
+        todos = re.findall(r"\[TODO[^\]]*\]", text)
+        for t in todos[1:]:
+            text = text.replace(t, "filled-in content that is long enough")
+        (kit / "HANDOFF.md").write_text(text, encoding="utf-8")
+        r = vh.validate(str(kit / "HANDOFF.md"))
+        self.assertEqual(r["todo_count"], 1)
+        self.assertEqual(r["missing_required"], [])
+        self.assertGreaterEqual(r["score"], 70)  # score alone would pass
+        out = io.StringIO()
+        with redirect_stdout(out):
+            ok = vh.report(r)
+        self.assertFalse(ok)
+        self.assertIn("NEEDS WORK", out.getvalue())
+
+    def test_filled_doc_becomes_ready(self):
+        kit, _ = self.create_kit("readydoc")
+        text = (kit / "HANDOFF.md").read_text(encoding="utf-8")
+        text = text.replace("[TODO: 一句话任务标题]", "polyline autofollow")
+        for placeholder in re.findall(r"\[TODO[^\]]*\]", text):
+            text = text.replace(placeholder, "filled-in content, long enough")
+        (kit / "HANDOFF.md").write_text(text, encoding="utf-8")
+        r = run([sys.executable, SCRIPTS / "validate_handoff.py",
+                 kit / "HANDOFF.md"], self.repo)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("READY", r.stdout)
+
+    def test_preflight_reports_toolchain(self):
+        r = run([sys.executable, SCRIPTS / "create_handoff.py", "--check"],
+                self.repo)
+        self.assertIn("toolchain found:", r.stdout)
+        self.assertIn("git=yes", r.stdout)
+
+    def test_tracked_handoff_still_warns(self):
+        kit, _ = self.create_kit("tracked")
+        run(["git", "add", "-f", str(kit / "HANDOFF.md")], self.repo)
+        r = run([sys.executable, SCRIPTS / "create_handoff.py", "--check"],
+                self.repo)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("git-tracked", r.stdout)
+
+    def test_update_pointer_only_writes_project_relative_link(self):
+        kit, _ = self.create_kit("ptr", "--target", "skill")
+        r = run([sys.executable, SCRIPTS / "create_handoff.py",
+                 "--update-pointer-only", kit.name], self.repo)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        agents = (self.repo / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertIn(f"handoffs/{kit.name}/HANDOFF.md", agents)
+
+
+class StalenessExitTests(KitTestCase):
+    def test_strict_exit_codes_do_not_collide(self):
+        # Regression: SLIGHTLY_STALE used to exit 1 — the same code as a
+        # missing file — so a CI could not tell advisory from fatal.
+        kit, _ = self.create_kit("codes", "--target", "skill")
+        r = run([sys.executable, SCRIPTS / "check_staleness.py", "/nonexistent"],
+                self.repo)
+        self.assertEqual(r.returncode, 1)
+        r = run([sys.executable, SCRIPTS / "check_staleness.py",
+                 kit / "HANDOFF.md", "--strict",
+                 "--slightly-commits", "0", "--slightly-files", "100"],
+                self.repo)
+        self.assertEqual(r.returncode, 10)
+        self.assertIn("SLIGHTLY_STALE", r.stdout)
+
+    def test_created_line_is_timezone_aware(self):
+        kit, _ = self.create_kit("tzcheck", "--target", "skill")
+        text = (kit / "HANDOFF.md").read_text(encoding="utf-8")
+        self.assertRegex(text,
+                         r"- Created: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [+-]\d{4}")
+        r = run([sys.executable, SCRIPTS / "check_staleness.py",
+                 kit / "HANDOFF.md"], self.repo)
+        self.assertIn("source: doc", r.stdout)
+
+    def test_age_falls_back_to_kit_dirname(self):
+        kit, _ = self.create_kit("agecheck", "--target", "skill")
+        text = (kit / "HANDOFF.md").read_text(encoding="utf-8")
+        text = re.sub(r"- Created: .+", "- Created: (garbled)", text)
+        (kit / "HANDOFF.md").write_text(text, encoding="utf-8")
+        r = run([sys.executable, SCRIPTS / "check_staleness.py",
+                 kit / "HANDOFF.md"], self.repo)
+        self.assertIn("source: kit-dir", r.stdout)
+        self.assertIn("Level: FRESH", r.stdout)
+
+    def test_current_head_is_reported(self):
+        kit, _ = self.create_kit("showhead", "--target", "skill")
+        r = run([sys.executable, SCRIPTS / "check_staleness.py",
+                 kit / "HANDOFF.md"], self.repo)
+        self.assertIn("cur  HEAD  :", r.stdout)
 
 
 if __name__ == "__main__":
