@@ -3,14 +3,17 @@
 orbital_handoff: validate a HANDOFF.md for completeness and safety.
 
 Checks: TODO placeholders, required/recommended sections, secret patterns,
-file references, quality score, and whether unresolved items from the
-previous handoff (chain 'Continues from') carry a done/blocked/moved outcome.
+file references, quality score, broken chain links ('Continues from' target
+missing/unreadable), git-tracking policy (a tracked handoff document is a
+policy violation — handoff docs never leave the machine), and whether
+unresolved items from the previous handoff carry a done/blocked/moved outcome.
 Exit 0 only when score >= 70 and no secrets.
 
 Usage: python3 validate_handoff.py handoffs/<kit>/HANDOFF.md
 """
 
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -21,12 +24,15 @@ SECRET_PATTERNS = [
     (r'["\']?[a-zA-Z_]*token["\']?\s*[:=]\s*["\'][^"\']{20,}["\']', "Token"),
     (r'-----BEGIN [A-Z]+ PRIVATE KEY-----', "PEM private key"),
     (r'mongodb(\+srv)?://[^/\s]+:[^@\s]+@', "MongoDB URL with password"),
-    (r'postgres://[^/\s]+:[^@\s]+@', "PostgreSQL URL with password"),
+    (r'postgres(ql)?://[^/\s]+:[^@\s]+@', "PostgreSQL URL with password"),
     (r'mysql://[^/\s]+:[^@\s]+@', "MySQL URL with password"),
+    (r'[a-zA-Z][a-zA-Z0-9+.\-]*://[^/\s:@]+:[^@\s]+@', "URL with embedded credentials"),
     (r'Bearer\s+[a-zA-Z0-9_\-\.]{20,}', "Bearer token"),
     (r'ghp_[a-zA-Z0-9]{36}', "GitHub PAT"),
     (r'github_pat_[a-zA-Z0-9_]{22,}', "GitHub fine-grained PAT"),
-    (r'sk-[a-zA-Z0-9]{40,}', "OpenAI-style API key"),
+    # Hyphen/underscore permissive: Anthropic-style keys (sk-ant-api03-…)
+    # escape a strictly-alphanumeric character class.
+    (r'sk-[a-zA-Z0-9\-_]{40,}', "OpenAI/Anthropic-style API key"),
     (r'xox[baprs]-[a-zA-Z0-9-]+', "Slack token"),
     (r'[a-f0-9]{32}\.[a-f0-9]{16}', "Zhipu-style key (id.secret)"),
     (r'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}', "JWT (JSON Web Token)"),
@@ -85,29 +91,53 @@ def check_previous_handover(content, base):
     chain points at via 'Continues from') must reappear in this document with
     an outcome (done / blocked / moved) — otherwise tasks silently drift
     across generations. Soft check: a missing or unreadable previous handoff
-    is informational, not a penalty; each unaccounted item costs 5 points
-    (capped like files_missing). Returns (unaccounted_items, prev_ref|None).
+    is reported as a chain warning and costs 2 points (a broken link must
+    never pass silently); each unaccounted item costs 5 points (capped like
+    files_missing). Returns (unaccounted_items, prev_ref|None, chain_error|None).
     """
     m = re.search(r"Continues from\*\*:\s*`([^`]+)`", content)
     if not m:
-        return [], None
+        return [], None, None
     prev_ref = m.group(1).strip()
     prev_path = Path(prev_ref)
     if not prev_path.is_absolute():
         prev_path = base / prev_ref
     if not prev_path.exists():
-        return [], prev_ref
+        return [], prev_ref, (f"Continues from points to a missing file: {prev_ref} "
+                              "— broken chain, closed-loop check skipped")
     try:
         prev_text = prev_path.read_text(encoding="utf-8")
     except OSError:
-        return [], prev_ref
+        return [], prev_ref, (f"Continues from target is unreadable: {prev_ref} "
+                              "— closed-loop check skipped")
     norm = re.sub(r"\s+", "", content)
     unaccounted = []
     for item in _prev_unresolved_items(prev_text):
         key = re.sub(r"\s+", "", item)[:14]
         if key and key not in norm:
             unaccounted.append(item[:60])
-    return unaccounted, prev_ref
+    return unaccounted, prev_ref, None
+
+
+def git_tracked(path, base):
+    """True when the handoff document is known to git (index or HEAD).
+
+    orbital_handoff policy: handoff documents never leave the machine, so a
+    tracked handoff is one `git push` away from leaking. Best-effort: any git
+    failure counts as 'not tracked' (this is a policy tripwire, not a gate).
+    """
+    if not (base / ".git").exists():
+        return False
+    try:
+        rel = path.resolve().relative_to(base.resolve())
+    except ValueError:
+        return False
+    try:
+        r = subprocess.run(["git", "ls-files", "--", str(rel)], cwd=str(base),
+                           capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return bool(r.stdout.strip())
 
 
 def validate(filepath):
@@ -139,7 +169,8 @@ def validate(filepath):
             if "/" in f and not f.startswith("http") and not f.endswith(".md"):
                 refs.add(f)
     files_missing = [f for f in sorted(refs) if not (base / f).exists()]
-    unaccounted, prev_ref = check_previous_handover(content, base)
+    unaccounted, prev_ref, chain_error = check_previous_handover(content, base)
+    tracked = git_tracked(path, base)
 
     score = 100
     if todos:
@@ -149,6 +180,10 @@ def validate(filepath):
         score -= 20
     score -= 5 * min(len(files_missing), 4)
     score -= 5 * min(len(unaccounted), 4)
+    if chain_error:
+        score -= 2  # a broken chain link must be visible, never silent
+    if tracked:
+        score -= 2  # a tracked handoff doc must be visible, never silent
     score -= 2 * len(missing_rec)
     score = max(0, score)
 
@@ -166,7 +201,8 @@ def validate(filepath):
             "missing_required": missing_req, "missing_recommended": missing_rec,
             "secrets": secrets, "files_checked": len(refs),
             "files_missing": files_missing[:8],
-            "unresolved_from_prev": unaccounted, "prev_ref": prev_ref}
+            "unresolved_from_prev": unaccounted, "prev_ref": prev_ref,
+            "chain_error": chain_error, "tracked": tracked}
 
 
 def report(r):
@@ -199,6 +235,11 @@ def report(r):
         print(f"[WARN] referenced files not found: {', '.join(r['files_missing'])}")
     elif r["files_checked"]:
         print(f"[INFO] {r['files_checked']} file reference(s) verified")
+    if r.get("chain_error"):
+        print(f"[WARN] {r['chain_error']}")
+    if r.get("tracked"):
+        print("[WARN] handoff document is git-tracked — policy violation: handoff "
+              "docs never leave this machine (fix: git rm -r --cached handoffs/)")
     if r.get("unresolved_from_prev"):
         print(f"[WARN] {len(r['unresolved_from_prev'])} unresolved item(s) from the "
               f"previous handoff ({r.get('prev_ref')}) lack an outcome here:")

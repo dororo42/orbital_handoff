@@ -14,13 +14,21 @@ Usage:
                               [--continues-from <dir-or-file>]
                               [--archive-old N]
     python3 create_handoff.py --check        # read-only preflight, writes nothing
+    python3 create_handoff.py --update-pointer-only <kit>
+                                             # re-apply only the AGENTS.md pointer
 
-Exit codes: 0 ok, 1 error, 2 preflight warnings found (check mode),
-            1 on [ABORT] when AGENTS.md changed on disk during pointer update.
+Exit codes: 0 ok, 1 error (including [ABORT]), 2 preflight warnings (check mode).
 
-Write safety: every write is atomic (temp file + os.replace); the AGENTS.md
-pointer update additionally carries an mtime guard (optimistic concurrency),
-so a concurrent external edit aborts instead of being clobbered.
+Write safety: every write is atomic (temp file + os.replace) and normalized
+to 0644; the AGENTS.md pointer update additionally carries an mtime guard
+(optimistic concurrency), so a concurrent external edit aborts instead of
+being clobbered. An [ABORT] during the pointer update rolls the freshly
+created kit back, so a plain re-run never duplicates it.
+
+Local-only policy: handoff documents never leave the machine. Creation
+appends `handoffs/` to the project .gitignore (a plain `git add .` can never
+pick them up) and warns when kits are already git-tracked (staged counts) —
+remediation: `git rm -r --cached handoffs`.
 """
 
 import argparse
@@ -47,7 +55,7 @@ def run_cmd(cmd, cwd=None, timeout=15):
 
 def git_info(root):
     info = {"is_repo": False, "branch": None, "head": None, "remote": None,
-            "commits": [], "modified": [], "staged": []}
+            "commits": [], "modified": [], "staged": [], "untracked": []}
     ok, _ = run_cmd(["git", "rev-parse", "--git-dir"], cwd=root)
     if not ok:
         return info
@@ -60,10 +68,24 @@ def git_info(root):
     info["remote"] = remotes if ok and remotes else ""
     ok, log = run_cmd(["git", "log", "--oneline", "-5", "--no-decorate"], cwd=root)
     info["commits"] = log.split("\n") if ok and log else []
-    ok, m = run_cmd(["git", "diff", "--name-only"], cwd=root)
-    info["modified"] = m.split("\n") if ok and m else []
-    ok, s = run_cmd(["git", "diff", "--name-only", "--cached"], cwd=root)
-    info["staged"] = s.split("\n") if ok and s else []
+    # git status --porcelain, NOT git diff: agents routinely leave new work
+    # untracked, and untracked files are exactly what a handoff must capture.
+    ok, st = run_cmd(["git", "status", "--porcelain"], cwd=root)
+    if ok and st:
+        for ln in st.splitlines():
+            if len(ln) < 4:
+                continue
+            name = ln[3:].strip().strip('"')
+            if " -> " in name:  # staged rename/copy: record the destination
+                name = name.split(" -> ")[-1]
+            x, y = ln[0], ln[1]
+            if x == "?" and y == "?":
+                info["untracked"].append(name)
+                continue
+            if x not in (" ", "?"):
+                info["staged"].append(name)
+            if y not in (" ", "?"):
+                info["modified"].append(name)
     return info
 
 
@@ -84,6 +106,7 @@ def atomic_write_text(path, text):
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
+        os.chmod(tmp, 0o644)  # mkstemp defaults to 0600; handoff docs are shared files
         os.replace(tmp, path)
     except BaseException:
         try:
@@ -126,7 +149,8 @@ def preflight(root):
     if g["is_repo"]:
         lines.append(f"branch: {g['branch']}  HEAD: {g['head']}")
         lines.append(f"remote: {g['remote'] or '(none)'}")
-        lines.append(f"uncommitted: {len(g['modified'])} modified, {len(g['staged'])} staged")
+        lines.append(f"uncommitted: {len(g['modified'])} modified, "
+                     f"{len(g['staged'])} staged, {len(g['untracked'])} untracked")
     else:
         warns.append("not inside a git repository — handoff can still be created, "
                      "but only the local-folder channel is available")
@@ -137,6 +161,12 @@ def preflight(root):
         warns.append(f"sensitive file present (must NOT enter the handoff): {h}")
     if len(hits) > 10:
         warns.append(f"...and {len(hits) - 10} more sensitive files (list truncated)")
+    tracked = handoffs_tracked(root)
+    if tracked:
+        extra = f" ...and {len(tracked) - 5} more" if len(tracked) > 5 else ""
+        warns.append("handoff doc(s) already git-tracked — they must never be "
+                     f"uploaded (fix: git rm -r --cached handoffs): "
+                     + ", ".join(tracked[:5]) + extra)
     return lines, warns
 
 
@@ -161,6 +191,43 @@ def _iter_sensitive(root):
             if rel.as_posix() in ignored:
                 continue
             yield p
+
+
+# ------------------------------------------------------------ local-only policy
+
+GITIGNORE_NOTE = "# orbital_handoff: 交接文档只在本机流转，永不 commit/push/上传"
+
+def handoffs_tracked(root):
+    """Paths under handoffs/ known to git (index or HEAD; empty when none).
+
+    Handoff documents must never leave the machine — anything git-tracked is
+    one `git push` away from leaking, and merely staged files count too.
+    """
+    if not (root / ".git").exists():
+        return []
+    ok, out = run_cmd(["git", "ls-files", "handoffs"], cwd=root)
+    return [ln for ln in out.splitlines() if ln.strip()] if ok and out else []
+
+
+def ensure_handoffs_ignored(root):
+    """Append handoffs/ to the project .gitignore so an ordinary `git add .`
+    can never stage handoff documents. Returns 'added' or 'present'. Never
+    untracks files by itself — the caller warns about tracked ones instead
+    (rewriting the index behind the user's back would be too invasive)."""
+    gi = root / ".gitignore"
+    try:
+        text = gi.read_text(encoding="utf-8") if gi.exists() else ""
+    except OSError:
+        text = ""
+    if any(ln.strip() == "handoffs/" for ln in text.splitlines()):
+        return "present"
+    if text and not text.endswith("\n"):
+        text += "\n"
+    if text:
+        text += "\n"
+    text += f"{GITIGNORE_NOTE}\nhandoffs/\n"
+    atomic_write_text(gi, text)
+    return "added"
 
 
 # ---------------------------------------------------------------- templates
@@ -235,6 +302,7 @@ HANDOFF_TMPL = """# Handoff: [TODO: 一句话任务标题]
 ### Blocker / 未决问题
 
 - [ ] [TODO: 阻塞项描述] —— 需要：[TODO: 解除条件]
+- [ ] [TODO: 待用户决策的问题] —— 建议：[TODO: 你的建议方案]
 
 ### 延后项
 
@@ -285,7 +353,7 @@ RESUME_PROMPT_TMPL = """# 接手指令（把本文件全文粘贴给目标 agent
 4. **确认后再动代码**：先跑文档里的构建/测试命令验证基线可用，再开始改动。
 5. **持续维护交接文档**：完成事项随手打钩并补一行结局（`→ 结局: done <结果> / blocked <原因> / moved <新条目号>`）；尝试过但没做完的条目必须标 `blocked`，不留无结局条目；新发现的坑补进「已知坑」——你也是未来的导出方。
 
-红线：不要提交/推送任何东西，除非用户明说；不要接触 .env、密钥、token；对文档假设与代码现实冲突的地方，以代码现实为准并报告。对 HANDOFF.md **只做加法和打钩**：不重排段落、不改章节标题、不动元数据与交接链——结构整理留给下一次 create_handoff。
+红线：交接文档（handoffs/）永不 commit、永不 push、永不上传——用户要求上传时说明风险并请用户自行操作；项目代码也不要提交/推送，除非用户明说；不要接触 .env、密钥、token；对文档假设与代码现实冲突的地方，以代码现实为准并报告。对 HANDOFF.md **只做加法和打钩**：不重排段落、不改章节标题、不动元数据与交接链——结构整理留给下一次 create_handoff。
 """
 
 AGENTS_PTR = """
@@ -301,18 +369,32 @@ AGENTS_PTR = """
 
 # ---------------------------------------------------------------- create
 
-def find_previous(root, ref):
+def find_previous(root, ref, exclude=None):
+    """Newest active kit, or the kit whose name contains `ref`, to chain from.
+
+    `exclude` skips the kit currently being created: it already exists on disk
+    while its HANDOFF.md does not yet, and it must never become its own
+    predecessor. Kits without a HANDOFF.md are ignored for the same reason —
+    a half-created scaffold is not a chain member. handoffs/archive/ holds
+    demoted kits — they left the authority chain and must never become its
+    head. Results are deterministic (newest by name, and names embed a
+    second-resolution timestamp).
+    """
     hd = root / "handoffs"
     if not hd.exists():
         return None
-    # handoffs/archive/ holds demoted kits — they left the authority chain and
-    # must never become its head.
-    active = [d for d in hd.iterdir() if d.is_dir() and d.name != "archive"]
+    active = [d for d in hd.iterdir()
+              if d.is_dir() and d.name != "archive" and d != exclude
+              and (d / "HANDOFF.md").exists()]
     if ref:
-        cands = [d for d in active if ref in d.name]
-        return cands[0] if cands else None
-    dirs = sorted(active, reverse=True)
-    return dirs[0] if dirs else None
+        cands = sorted(d for d in active if ref in d.name)
+        if not cands:
+            return None
+        if len(cands) > 1:
+            print(f"[WARN] --continues-from '{ref}' matched {len(cands)} kits; "
+                  f"using the newest: {cands[-1].name}")
+        return cands[-1]
+    return sorted(active)[-1] if active else None
 
 
 def update_agents_pointer(root, relpath, branch, head):
@@ -375,8 +457,8 @@ def archived_index(root):
         return ""
     items = []
     for n in names:
-        parts = n.split("-", 3)  # YYYY-MM-DD-HHMM-<slug>
-        date = parts[0] if parts else n
+        parts = n.split("-", 3)  # 'YYYY', 'MM', 'DD', 'HHMMSS-<slug>'
+        date = "-".join(parts[:3]) if len(parts) >= 3 else n
         topic = parts[3] if len(parts) > 3 else n
         items.append(f"{topic}({date})")
     return "\n- 更早交接（已归档，按需回溯）: " + "、".join(items)
@@ -384,24 +466,56 @@ def archived_index(root):
 
 def create(root, slug, target, continues_from, source_agent, archive_old=5):
     now = datetime.now()
-    stamp = now.strftime("%Y-%m-%d-%H%M")
+    # Second resolution: same-minute kits used to sort alphabetically, which
+    # silently broke "keep the newest N" archiving and chain selection.
+    stamp = now.strftime("%Y-%m-%d-%H%M%S")
     slug = re.sub(r"[^a-z0-9-]", "-", slug.lower().replace(" ", "-").replace("_", "-"))
     slug = re.sub(r"-+", "-", slug).strip("-") or "handoff"
-    kit_dir = root / "handoffs" / f"{stamp}-{slug}"
+    hd = root / "handoffs"
+
+    # Sweep stray temp files from a crashed run before doing anything else.
+    if hd.exists():
+        for t in list(hd.rglob(".tmp-handoff-*")) + list(root.glob(".tmp-handoff-*")):
+            try:
+                t.unlink()
+            except OSError:
+                pass
+
+    kit_dir = hd / f"{stamp}-{slug}"
+    if kit_dir.exists():  # same-second, same-slug: suffix, never silently overwrite
+        for i in range(2, 100):
+            alt = hd / f"{stamp}-{slug}-{i}"
+            if not alt.exists():
+                kit_dir = alt
+                break
+        else:
+            print("[ABORT] could not resolve a handoffs/ name collision; "
+                  "pick a different slug.")
+            sys.exit(1)
     kit_dir.mkdir(parents=True, exist_ok=True)
 
+    g = git_info(root)
+    # Resolve the chain predecessor BEFORE archiving: a named --continues-from
+    # link may legitimately target a kit that this very call demotes, and the
+    # newest kit must stay chainable across an archive boundary. The path
+    # written into the doc follows the kit into handoffs/archive/ (see below),
+    # so the link never dangles.
+    prev = find_previous(root, continues_from, exclude=kit_dir)
     moved = archive_old_kits(root, archive_old)
     if moved:
         print(f"[archive] demoted {len(moved)} old kit(s) to handoffs/archive/: "
               + ", ".join(moved))
-
-    g = git_info(root)
-    prev = find_previous(root, continues_from)
+        if prev is not None and prev.name in moved:
+            prev = root / "handoffs" / "archive" / prev.name
     if continues_from and not prev:
-        print(f"[WARN] --continues-from '{continues_from}' not found; chain not linked.")
+        print(f"[WARN] --continues-from '{continues_from}' not found among active "
+              "kits (archived kits are outside the chain); chain not linked.")
 
     if prev:
-        chain = (f"- **Continues from**: `{'handoffs/' + prev.name + '/HANDOFF.md'}`\n"
+        prev_rel = (f"handoffs/archive/{prev.name}/HANDOFF.md"
+                    if prev.parent.name == "archive"
+                    else f"handoffs/{prev.name}/HANDOFF.md")
+        chain = (f"- **Continues from**: `{prev_rel}`\n"
                  f"- **Supersedes**: [TODO: 列出本份取代的旧交接，或 None]")
     else:
         chain = "- **Continues from**: None（首轮交接）\n- **Supersedes**: None"
@@ -410,13 +524,17 @@ def create(root, slug, target, continues_from, source_agent, archive_old=5):
         chain += arch_note
 
     commits = "\n".join(f"- {c}" for c in g["commits"]) or "- [not a git repo / no commits]"
-    allmod = sorted(set(g["modified"]) | set(g["staged"]))
+    untracked = set(g["untracked"])
+    allmod = sorted(set(g["modified"]) | set(g["staged"]) | untracked)
     if allmod:
-        mod = "\n".join(f"| {f} | [TODO: 改动说明] | [TODO: 原因] |" for f in allmod[:15])
+        mod = "\n".join(
+            f"| {f}{'（untracked 新文件）' if f in untracked else ''} "
+            f"| [TODO: 改动说明] | [TODO: 原因] |"
+            for f in allmod[:15])
         if len(allmod) > 15:
             mod += f"\n| …及另外 {len(allmod) - 15} 个文件 | | |"
     else:
-        mod = "| （无未提交修改） | | |"
+        mod = "| （无未提交修改，工作区干净） | | |"
 
     project = g["remote"] or str(root)
     handoff = HANDOFF_TMPL.format(
@@ -438,14 +556,42 @@ def create(root, slug, target, continues_from, source_agent, archive_old=5):
 
     agents_action = ""
     if target in ("rules", "all"):
-        agents_action = update_agents_pointer(
-            root, f"handoffs/{kit_dir.name}/HANDOFF.md", g["branch"], g["head"])
+        try:
+            agents_action = update_agents_pointer(
+                root, f"handoffs/{kit_dir.name}/HANDOFF.md", g["branch"], g["head"])
+        except SystemExit:
+            # OCC abort: roll the brand-new kit back so a re-run does not leave
+            # an orphan scaffold that later creates would treat as the newest
+            # chain member.
+            shutil.rmtree(kit_dir, ignore_errors=True)
+            print(f"[cleanup] removed the half-created kit {kit_dir.name} — "
+                  "settle the AGENTS.md conflict, then re-run this command.")
+            raise
 
     print(f"Created handoff kit: {kit_dir}")
     for m in made:
         print(f"  - {m.name}: {m}")
     if agents_action:
         print(f"  - AGENTS.md: {agents_action} (Current Handoff pointer)")
+    hits = sorted(set(_iter_sensitive(root)))
+    if hits:
+        print("[WARN] sensitive file(s) present — they must NOT enter the handoff:")
+        for h in hits[:10]:
+            print(f"  - {h}")
+        if len(hits) > 10:
+            print(f"  ...and {len(hits) - 10} more")
+    if ensure_handoffs_ignored(root) == "added":
+        print("  - .gitignore: added handoffs/ — handoff docs stay local, "
+              "never committed/pushed/uploaded")
+    tracked = handoffs_tracked(root)
+    if tracked:
+        print("[WARN] handoff doc(s) are git-tracked — they must NEVER be "
+              "committed/pushed/uploaded:")
+        for t in tracked[:5]:
+            print(f"  - {t}")
+        if len(tracked) > 5:
+            print(f"  ...and {len(tracked) - 5} more")
+        print("  fix: git rm -r --cached handoffs")
     print("\nNext steps:")
     print(f"1. Fill every [TODO] in {kit_dir}/HANDOFF.md "
           "(prioritize: 当前状态摘要 / 重要上下文 / 立即下一步)")
@@ -456,8 +602,34 @@ def create(root, slug, target, continues_from, source_agent, archive_old=5):
               "orbital_handoff skill handles RESUME.")
     if agents_action == "created":
         print("3. AGENTS.md was newly created — fill its [TODO] project description.")
-    print("4. Do not commit/push until the user asks.")
+    print("4. Local-only policy: handoff docs are NEVER committed/pushed/uploaded; "
+          "handoffs/ is gitignored — transfer between machines by copying the folder.")
     return str(kit_dir)
+
+
+def update_pointer_only(root, kit_ref):
+    """Re-apply the AGENTS.md Current Handoff pointer for an existing kit.
+
+    Recovery path for kits whose pointer step never ran (e.g. created with an
+    older version that aborted, or a target-mode change). Creates nothing
+    except the pointer section itself.
+    """
+    kit = Path(kit_ref)
+    if not kit.is_absolute():
+        cand = root / "handoffs" / kit
+        kit = cand if (cand / "HANDOFF.md").exists() else root / kit
+    handoff = kit / "HANDOFF.md"
+    if not handoff.exists():
+        print(f"[ERROR] HANDOFF.md not found under {kit}")
+        sys.exit(1)
+    text = handoff.read_text(encoding="utf-8")
+    m = re.search(r"(?:^|\n)-\s*Branch:\s*(.+)", text)
+    branch = m.group(1).strip() if m else "(unknown)"
+    m = re.search(r"(?:^|\n)-\s*HEAD:\s*([0-9a-f]+)", text)
+    head = m.group(1) if m else "(unknown)"
+    action = update_agents_pointer(root, f"handoffs/{kit.name}/HANDOFF.md", branch, head)
+    print(f"AGENTS.md: {action} (Current Handoff pointer -> "
+          f"handoffs/{kit.name}/HANDOFF.md)")
 
 
 def main():
@@ -472,11 +644,18 @@ def main():
     ap.add_argument("--archive-old", type=int, default=5, metavar="N",
                     help="keep the newest N kits in handoffs/ and demote older "
                          "ones to handoffs/archive/ (0 disables; default 5)")
+    ap.add_argument("--update-pointer-only", metavar="KIT", default=None,
+                    help="re-apply only the AGENTS.md Current Handoff pointer for "
+                         "an existing kit (KIT = kit dir name or path)")
     ap.add_argument("--check", action="store_true",
                     help="read-only preflight; creates nothing")
     args = ap.parse_args()
 
     root = Path.cwd()
+
+    if args.update_pointer_only:
+        update_pointer_only(root, args.update_pointer_only)
+        sys.exit(0)
 
     if args.check:
         lines, warns = preflight(root)

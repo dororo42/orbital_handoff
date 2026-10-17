@@ -7,6 +7,7 @@ repository state and rates freshness:
   FRESH | SLIGHTLY_STALE | STALE | VERY_STALE
 
 Usage: python3 check_staleness.py handoffs/<kit>/HANDOFF.md
+       python3 check_staleness.py handoffs/<kit>/HANDOFF.md --strict
 """
 
 import re
@@ -67,6 +68,9 @@ def main():
                     help="files changed to flag SLIGHTLY_STALE (default 5)")
     ap.add_argument("--stale-files", type=int, default=15,
                     help="files changed to flag STALE (default 15)")
+    ap.add_argument("--strict", action="store_true",
+                    help="exit code mirrors the level: 0 FRESH, 1 SLIGHTLY_STALE, "
+                         "2 STALE, 3 VERY_STALE (the not-a-repo case still exits 2)")
     args = ap.parse_args()
 
     path = Path(args.handoff)
@@ -90,13 +94,21 @@ def main():
     commits_since = None
     files_changed = None
     if doc_head and doc_head not in ("(no commits yet)", "(detached or no branch)"):
-        ok, cnt = run_cmd(["git", "rev-list", "--count", f"{doc_head}..HEAD"], cwd=root)
-        if ok:
-            commits_since = int(cnt) if cnt else 0
+        # rev-list A..B happily succeeds when A's object still exists but is no
+        # longer an ancestor of HEAD (orphan branch, rebase, amend) — it just
+        # counts as if A were an excluded root. Ask ancestry explicitly first;
+        # only a true ancestor may feed the counters below.
+        ok_anc, _ = run_cmd(["git", "merge-base", "--is-ancestor", doc_head, "HEAD"],
+                            cwd=root)
+        if not ok_anc:
+            commits_since = None  # doc head not reachable from current history
         else:
-            commits_since = None  # doc head no longer reachable
-        ok, fc = run_cmd(["git", "diff", "--name-only", f"{doc_head}..HEAD"], cwd=root)
-        files_changed = len(fc.split("\n")) if ok and fc else 0
+            ok, cnt = run_cmd(["git", "rev-list", "--count", f"{doc_head}..HEAD"],
+                              cwd=root)
+            commits_since = int(cnt) if ok and cnt else None
+            ok, fc = run_cmd(["git", "diff", "--name-only", f"{doc_head}..HEAD"],
+                             cwd=root)
+            files_changed = len(fc.split("\n")) if ok and fc else 0
 
     age_hours = None
     if meta.get("created"):
@@ -126,8 +138,12 @@ def main():
             level = "VERY_STALE"
             reasons.append(f"{commits_since} commits since handoff")
         elif commits_since > args.stale_commits or (files_changed or 0) > args.stale_files:
+            # Reaching this branch via the file-count threshold alone is still a
+            # large diff surface ("明显变化") — it must not downgrade to
+            # SLIGHTLY_STALE just because the commit count is low (squash/rebase
+            # style histories commonly look exactly like that).
             if level != "VERY_STALE":
-                level = "STALE" if commits_since > args.stale_commits else "SLIGHTLY_STALE"
+                level = "STALE"
             reasons.append(f"{commits_since} commits / {files_changed} files changed")
         elif commits_since > args.slightly_commits or (files_changed or 0) > args.slightly_files:
             if level == "FRESH":
@@ -158,6 +174,8 @@ def main():
         "VERY_STALE": "consider discarding this handoff and creating a fresh one",
     }
     print(f"Advice: {advice[level]}")
+    if args.strict:
+        sys.exit({"FRESH": 0, "SLIGHTLY_STALE": 1, "STALE": 2, "VERY_STALE": 3}[level])
     sys.exit(0)
 
 

@@ -1,17 +1,18 @@
 ---
 name: orbital_handoff
+version: 0.2.0
 description: Cross-agent project handoff for isolated AI coding agents (Claude Code, Codex, Cursor, zcode, GLM, etc.) that can only share state through local folders or Git repositories — no shared context, no shared memory. Use this skill whenever the user wants to 交接/移交/打包项目 hand off a project to another agent, machine, or fresh session; 接手/继承/恢复项目 take over or resume a project from a handoff; create a handoff before context runs out; migrate a project between agents (e.g. Claude Code → Codex → zcode); save session state; or 检查能否交接 check handoff readiness. Generates self-contained handoff kits (HANDOFF.md + agent-neutral AGENTS.md pointer + paste-ready resume prompt) matched to the target agent's capability mode — works even when the target agent has NO skill framework.
 ---
 
 # Orbital Handoff（跨隔离 agent 项目交接）
 
-让相互隔离的 AI agent 之间安全交接正在开发的项目。约束条件：**agent 之间唯一的通道是本地文件夹或 Git 仓库**——没有共享上下文，没有共享记忆。因此本 skill 的核心思路是：
+让相互隔离的 AI agent 之间安全交接正在开发的项目。约束条件：**agent 之间唯一的通道是本地文件夹**——没有共享上下文，没有共享记忆，交接文档也只在本机流转。因此本 skill 的核心思路是：
 
 > **让仓库自己携带足够的上下文，使任何 agent（无论有无 skill 框架）都能零歧义地接手。**
 
 三条铁律：
 
-1. 交接物 = 项目内自包含文件集（`handoffs/` 目录 + 可选的根目录 `AGENTS.md` 指针），可整体提交进 Git 或单独拷贝文件夹。
+1. 交接物 = 项目内自包含文件集（`handoffs/` 目录 + 可选的根目录 `AGENTS.md` 指针），**只生存在本地文件系统**——永不 commit、永不 push、永不上传（远端仓库、云盘、聊天工具都算上传）；跨机器转移由用户手动拷贝文件夹完成。
 2. 目标 agent 的能力是分档的（见「模式匹配」），交接套件必须按档位配置——宁可三档全配，也不默认对方有 skill 框架。
 3. 凭证、`.env`、私钥、token、原始聊天记录、原始记忆库**永远不进交接物**。交接的是项目状态，不是账号。
 
@@ -27,7 +28,7 @@ description: Cross-agent project handoff for isolated AI coding agents (Claude C
 | `交给 zcode/某 agent`、`迁移到 XX` | CREATE + 指定目标 | 按 [模式匹配](#目标-agent-模式匹配) 配置套件 |
 | `上下文快满了`、`context is getting full` | 主动建议 CREATE | 先建议，用户点头再执行 |
 
-默认假设：源 agent = 当前运行的 agent；目标 agent = 未指明（按 `all` 三档全配）；当前目录在 Git 仓库内 = 项目本身；用户没说 `提交/推送` 就不 commit/push，只生成文件。
+默认假设：源 agent = 当前运行的 agent；目标 agent = 未指明（按 `all` 三档全配）；当前目录在 Git 仓库内 = 项目本身；交接文档**任何情况下都不 commit/push/上传**——即使用户要求提交/推送项目代码，`handoffs/` 也必须排除在外（create 会自动把 `handoffs/` 写进 `.gitignore`，并拒绝暂存交接文档）。
 
 ## 目标 agent 模式匹配
 
@@ -41,7 +42,7 @@ description: Cross-agent project handoff for isolated AI coding agents (Claude C
 
 常见 agent 归类参考（会过时，以实测为准）：Claude Code ≈ S+R；Codex CLI ≈ R(+S)；GLM Code / 装了 skills 的 agent ≈ S；zcode 及多数轻量 CLI agent ≈ R 或 P；未知 agent → 按 P 档准备。
 
-**目标未知时选 `all`**：同时生成 S/R/P 三套配置。代价只是几个小文件，收益是接收端怎么都能用——本地文件夹拷过去、GitHub 上 clone 下来，对方按自己的档位取用即可。判定逻辑详见 [references/agent-mode-matrix.md](references/agent-mode-matrix.md)。
+**目标未知时选 `all`**：同时生成 S/R/P 三套配置。代价只是几个小文件，收益是接收端怎么都能用——交接套件由用户整体拷贝到目标机器，对方按自己的档位取用即可。判定逻辑详见 [references/agent-mode-matrix.md](references/agent-mode-matrix.md)。
 
 ## CHECK 工作流（只读预检）
 
@@ -65,9 +66,9 @@ description: Cross-agent project handoff for isolated AI coding agents (Claude C
 python3 scripts/create_handoff.py <slug> --target all [--continues-from <旧交接文件>]
 ```
 
-脚本自动预填 git 元数据（分支、HEAD、最近提交、改动文件）、建立交接链、生成带 `[TODO: ...]` 占位符的文档骨架到 `handoffs/YYYY-MM-DD-HHMM-<slug>/`。`--archive-old N`（默认 5）会把最旧的交接降级到 `handoffs/archive/`（只归档、永不删除），并在新文档交接链里自动附一行归档索引。
+slug 请用 ASCII（中文等非 ASCII 字符会被清洗掉，退化成兜底名 `handoff`）。脚本自动预填 git 元数据（分支、HEAD、最近提交、已修改/已暂存/**untracked 新文件**）、建立交接链、生成带 `[TODO: ...]` 占位符的文档骨架到 `handoffs/YYYY-MM-DD-HHMMSS-<slug>/`（时间戳精确到秒；同秒同 slug 自动加后缀，绝不覆盖已有 kit）。`--archive-old N`（默认 5）会把最旧的交接降级到 `handoffs/archive/`（只归档、永不删除），并在新文档交接链里自动附一行归档索引。
 
-写入安全性：所有文件为原子写（临时文件 + 原子替换）；AGENTS.md 指针更新带并发防护（OCC）——若打印 `[ABORT]`，说明 AGENTS.md 正被外部编辑，等其稳定后重跑或手工合并指针段，绝不静默覆盖他人改动。
+写入安全性：所有文件为原子写（临时文件 + 原子替换，权限规范化为 0644）；AGENTS.md 指针更新带并发防护（OCC）——若打印 `[ABORT]`，说明 AGENTS.md 正被外部编辑，脚本会**回滚刚创建的 kit**（不留半成品），等其稳定后重跑即可，绝不静默覆盖他人改动。若历史 kit 的指针步骤缺失，可用 `--update-pointer-only <kit>` 单独补指针。
 
 ### 第 3 步：填充文档
 
@@ -90,18 +91,18 @@ python3 scripts/validate_handoff.py handoffs/<目录>/HANDOFF.md
 ### 第 5 步：按档位配置配套件
 
 - **R 档**：确保项目根 `AGENTS.md` 存在（没有则创建），在文末维护 `## Current Handoff` 指针段指向最新交接文档。已有 `CLAUDE.md` 的项目让它 `@AGENTS.md` 引用，不重复内容。
-- **P 档**：`RESUME_PROMPT.md` 已由脚本生成，确认其中交接文档路径/仓库 URL 填写正确。
-- 提醒用户 `.gitignore` 检查：`handoffs/` 应当提交（这正是通道），`*.local.md`、`.env` 不应提交。
+- **P 档**：`RESUME_PROMPT.md` 已由脚本生成，确认其中交接文档路径填写正确（交接文档只在本地，按目标机器上的实际位置填写）。
+- 交接文档不上传：脚本已自动把 `handoffs/` 写入项目 `.gitignore`，普通 `git add` 不会带上它；若发现 `handoffs/` 曾被 git 跟踪（历史遗留），提示用户 `git rm -r --cached handoffs` 解除跟踪。`*.local.md`、`.env` 同样不入库。
 
 ### 第 6 步：交付建议
 
-向用户报告：套件位置、验证分数、目标档位与接收方式、明确禁止迁移的文件类别。用户说「提交/推送」时：提交到当前分支或 `handoff/YYYMMDD` 分支再 push；不说就停在生成完毕。
+向用户报告：套件位置、验证分数、目标档位与接收方式、明确禁止迁移的文件类别，并明确告知**交接文档只保存在本地，不会 commit/push/上传**，跨机器转移由用户自行拷贝 `handoffs/` 文件夹。用户说「提交/推送」时：只针对项目代码，执行前先确认 `handoffs/` 已被 `.gitignore` 排除且不在暂存区；用户坚持要上传交接文档本身时，说明风险（交接内容含项目全貌与决策细节）并把决定权交还用户，skill 不代为上传。
 
 ## RESUME 工作流（接手）
 
 ### 第 1 步：定位交接文档
 
-优先级：`handoffs/` 最新目录 > `AGENTS.md` 的 Current Handoff 指针 > 用户给的路径/仓库 URL。多个交接构成链时，读最新一份，按 `Continues from` 按需回溯。
+优先级：`handoffs/` 最新目录 > `AGENTS.md` 的 Current Handoff 指针 > 用户给的本地路径。多个交接构成链时，读最新一份，按 `Continues from` 按需回溯。
 
 ### 第 2 步：新鲜度核验
 
@@ -125,17 +126,20 @@ FRESH → 直接继续；SLIGHTLY_STALE → 先看新提交；STALE/VERY_STALE �
 
 ## 边界
 
-**交接**：Git 仓库与提交、`handoffs/` 全部内容、根 `AGENTS.md` 与其指针段、`CLAUDE.md`（仅作为引用壳）、项目文档、经用户明确批准且脱敏后的记忆摘要。
+**交接（仅本地拷贝，不上传）**：`handoffs/` 全部内容、根 `AGENTS.md` 与其指针段、`CLAUDE.md`（仅作为引用壳）、项目文档、经用户明确批准且脱敏后的记忆摘要。
 
 **不交接**：任何凭证类文件、`.env`、SSH 私钥、token、浏览器/登录态、原始对话记录、原始记忆数据库、构建产物、依赖缓存、日志。用户要求迁移这些时，拒绝该部分并解释风险，提供脱敏摘要替代。
+
+**不上传**：交接文档本身（`handoffs/`）在任何场景下都不进入 Git 提交、远端仓库、云盘或聊天工具——它是本地交接通道，不是发布物。
 
 ## 资源
 
 | 文件 | 用途 |
 |---|---|
-| `scripts/create_handoff.py` | 脚手架：预填 git 元数据、按档位生成套件、`--check` 只读预检 |
-| `scripts/validate_handoff.py` | 完整性 + 密钥 + 质量分验证 |
-| `scripts/check_staleness.py` | 交接文档新鲜度评级 |
-| `references/handoff-template.md` | 交接文档模板与填写指引 |
+| `scripts/create_handoff.py` | 脚手架：预填 git 元数据、按档位生成套件、`--check` 只读预检、`--update-pointer-only` 指针恢复 |
+| `scripts/validate_handoff.py` | 完整性 + 密钥 + 交接链 + 质量分验证 |
+| `scripts/check_staleness.py` | 交接文档新鲜度评级（`--strict` 用退出码区分档位，供 CI 使用） |
+| `scripts/tests/` | 脚本回归测试；改动 `scripts/` 后运行 `python3 -m unittest discover -s scripts/tests` |
+| `references/handoff-template.md` | 交接文档模板与填写指引（生成源在 create_handoff.py） |
 | `references/resume-checklist.md` | 接手方核查清单 |
 | `references/agent-mode-matrix.md` | 目标 agent 档位判定详表 |
