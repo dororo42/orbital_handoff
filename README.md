@@ -51,7 +51,7 @@ python3 -m unittest discover -s orbital_handoff/scripts/tests -v
 
 ```
 .
-├── orbital_handoff/                     # skill 源码（v0.2.2）
+├── orbital_handoff/                     # skill 源码（v0.2.3）
 │   ├── SKILL.md                         # 主文档：CREATE / RESUME / CHECK 三工作流
 │   ├── README.md                        # 包内说明（安装路径 / 组成 / 安全基线）
 │   ├── references/                      # 档位矩阵 / 交接模板 / 接手核查清单
