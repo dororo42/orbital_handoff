@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 审查/复测产生的运行时产物（skill 自身会在项目里生成 handoffs/，勿提交到本仓库根）
+handoffs/
+AGENTS.md
+.tmp-handoff-*
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
