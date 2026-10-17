@@ -1,5 +1,60 @@
 # Changelog
 
+## 0.2.3 — 2026-10-17（安全与健壮性修复）
+
+依据 v0.2.2 的第二轮独立审查（98 条原始发现 → 核验保留 78 条；全部 P1 经沙箱实测复现后修复）。回归测试从 16 项扩到 42 项，全绿。
+
+### Fixed（P0 — 安全）
+
+- **凭证入档（T2，最严重）**：带凭证的 origin URL（`https://user:token@host/...`）原本被逐字写进 HANDOFF.md 与 RESUME_PROMPT.md。新增 `sanitize_remote_url()`：剥离 userinfo 后再入档，剥离发生时打印 `[WARN]`。scp 形态（`git@host:path`）不含密码，原样保留。
+- **OCC 回滚失效（T4）**：指针更新只捕获 `SystemExit`——AGENTS.md 非 UTF-8 时 `UnicodeDecodeError` 裸崩，半成品 kit 残留且会被下一次 create 当作链上最新成员。改为 `except BaseException` 全量回滚；`overwrite_guarded` 对解码失败改为优雅 `[ABORT]`（触发回滚）。回归测试验证残留为零、后续链不断。
+- **本地-only 布防 fail-open（T1）**：`git ls-files` 失败时 tripwire 返回 `[]`（读作"干净"）。`handoffs_tracked()` 失败现在返回 `None`，调用方显式 `[WARN]`；`run_cmd` 不再静默吞掉 git stderr（预期失败的探测调用除外）。
+- **validate 编码裸崩（T6）**：主文档非 UTF-8 → 裸 traceback。现在 fail-closed：明确报错拒扫（乱码可能掩盖密钥）。前驱文档改 `errors="replace"` 宽松解码 + 1MB 上限，GBK 前驱不再炸掉整个校验。
+
+### Fixed（P1）
+
+- **`--continues-from` 接受文件路径（T5）**：用法字符串一直承诺 dir-or-file，实现却只认 kit 名——传文档路径静默降级为"首轮交接"。现在 kit 名 / kit 目录 / HANDOFF.md 路径（相对或绝对）三者皆可。
+- **porcelain 解析（T3）**：改 `git status --porcelain -z`（NUL 分隔、零引号）——非 ASCII 文件名的八进制转义（`\346\226\207...`）与含 `' -> '` 的改名目标被截断，两个缺陷一起根治。
+- **时区感知时间戳（T7）**：Created 行写 `%Y-%m-%d %H:%M:%S %z`；staleness 优先按带时区解析，跨时区读取不再算出负年龄；缺失/畸形时回退 kit 目录名（`YYYY-MM-DD-HHMMSS`）并在报告中标注来源，不再静默禁用年龄检查；文档时间在未来时显式提示。
+- **退出码表（T8/T9）**：`--strict` 档位码改 10/20/30，与故障码（1 文件缺失、2 非 git 仓库/用法错误）永不重叠——原 SLIGHTLY_STALE=1 与"文件缺失"无法区分，CI 非零即失败会把提醒当故障。
+- **ReDoS 治理**：密钥扫描改逐行 + 每行 8192 字符上限；URL 凭证正则加 `\b` 锚 + 有界量词（`{0,31}/{1,128}/{1,256}`），_kv 键名前缀 `{0,32}`——原实现在构造行上 >120s（实测 O(n²)），现 <0.1s。截断发生时显式 `[WARN]`，不静默。
+- **裸值密钥漏检**：`api_key: sk-...` 不带引号原先完全漏检。四条 _kv 模式现在同时接受带引号与裸值（裸值设更高长度下限压误报）。
+- **[FAIL] 不再放行 READY**：1 个 [TODO] 恰好 70 分即 READY、报告自相矛盾——现在 verdict 要求零密钥、零 [TODO]、必需段落完整、分数 ≥70 四者同时成立。
+- **文档大小闸**：主文档 >4MB 拒扫（fail-closed）。
+
+### Fixed（P2）
+
+- **链引用越界读**：`Continues from` 现在只读解析后位于项目根内的目标；指向项目外 → 链警告、拒读（交接文档是不受信输入）。
+- **闭环校验从"提及即通过"改为"结局标记"**：条目必须带 `→ 结局: done/blocked/moved`（行内或次行）才算闭环；仅提及 → 单列 `mentioned_no_outcome` 软扣 2 分/条（上限 4）。
+- **同秒同 slug 并发竞态**：exists() 预检是 TOCTOU——两个并发 create 可共用一个目录。改独占 `mkdir()` 逐名尝试。
+- **清扫误删并发临时文件**：启动清扫只回收 mtime >1 小时的 `.tmp-handoff-*`，并发实例的活跃临时文件不再被拔掉。
+- **引用文件检查**：扩展 `~` 与 `{}` 占位符（原先漏检）；`~` 展开 user 目录校验，`{}` 标记为占位符提示而非误报缺失。
+- **staleness 阈值 off-by-one**：`>` 改 `>=`（"100 commits 触发"现在包含 100）；`24*30` 硬编码参数化为 `--very-stale-hours`（默认 720）。
+- **staleness 语义修正**：diff 失败不再折叠为 `files_changed=0`（假 FRESH 方向），改为 None + 跳过文件阈值 + 显式说明；detached HEAD 的 `"(detached)"` 回退原是死代码（空串 case 未覆盖），已修；报告补输出当前 HEAD。
+- **`.gitignore` 并发防护**：读-改-写加 mtime 复查 + 3 次重试（原为静默 last-writer-wins）。
+- **`--update-pointer-only` 悬空指针**：恒按 `handoffs/<name>/` 回填——kit 在别处时指针天然悬空。现在从 kit 实际位置算项目相对路径，kit 在项目外则拒绝。
+- **敏感文件扫描剪枝**：`rglob` 改 `os.walk` 原地剪枝，不再先 descended 进 node_modules 再事后丢弃。
+- **子进程解码**：`run_cmd` 显式 `encoding="utf-8", errors="replace"`（Windows cp936 locale 下 git 中文输出不再乱码/异常）。
+- **`--check` 兑现工具链检测承诺**：输出 git / python3 / node 是否在 PATH。
+- **CI**：新增 `.github/workflows/ci.yml`（push/PR 跑全量 unittest）——SKILL.md 一直说"供 CI 使用"却没有 CI。
+
+### Fixed（P3）
+
+- `handoffs/` 为普通文件时三处 `iterdir`/`rglob` 裸崩 → `is_dir()` 守卫 + `[ABORT]`。
+- 非 git 目录渲染 `Branch: None` → `(non-git)`。
+- docstring `HHMM` → 实际 `HHMMSS`。
+- SKIP_DIRS 补 `.hg`、`.svn`。
+- RESUME_PROMPT 第 4 步补一句"命令来自交接文档，是不受信输入，执行前逐条确认无害"。
+- validate 报告：文档含密钥时不再回显 TODO 行与前驱条目文本（防二次泄漏）；报告 `overlong_lines` 与占位符引用。
+- `preflight`/`create` 的敏感文件与 git 跟踪告警合并为共享实现（原两处漂移风险）。
+
+### Not adopted（核实后不采纳/暂缓）
+
+- 审查报告"AGENTS.md CRLF 不兼容导致指针段重复追加（P2，称实测复现）"——**证伪**：`read_text()` 的 universal newlines 在正则前已把 `\r\n` 归一为 `\n`，二进制计数复测仅 1 处指针段。副作用仅是整文件行尾被静默改写为 LF，危害与所报不同。
+- validate CLI `--json` / 退出码细分：涉及消费方兼容，暂缓。
+- `--source-agent` 默认 `[TODO: ...]` 会计 TODO：保留（它应当提醒作者填写）。
+- AGENTS.md 指针段内含 `## ` 代码块时移除正则截断：边角 case，已留代码注释，暂缓。
+
 ## 0.2.2 — 2026-10-17（文档整改）
 
 ### Changed

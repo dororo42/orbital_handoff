@@ -1,6 +1,6 @@
 ---
 name: orbital_handoff
-version: 0.2.2
+version: 0.2.3
 description: Cross-agent project handoff for isolated AI coding agents (Claude Code, Codex, Cursor, zcode, GLM, etc.) that can only share state through local folders — no shared context, no shared memory, and handoff documents are local-only (never committed, pushed, or uploaded). Use this skill whenever the user wants to 交接/移交/打包项目 hand off a project to another agent, machine, or fresh session; 接手/继承/恢复项目 take over or resume a project from a handoff; create a handoff before context runs out; migrate a project between agents (e.g. Claude Code → Codex → zcode); save session state; or 检查能否交接 check handoff readiness. Generates self-contained handoff kits (HANDOFF.md + agent-neutral AGENTS.md pointer + paste-ready resume prompt) matched to the target agent's capability mode — works even when the target agent has NO skill framework.
 ---
 
@@ -86,7 +86,7 @@ slug 请用 ASCII（中文等非 ASCII 字符会被清洗掉，退化成兜底�
 python3 scripts/validate_handoff.py handoffs/<目录>/HANDOFF.md
 ```
 
-检查 TODO 残留、必需段落完整性、密钥泄漏、引用文件是否存在，输出 0-100 质量分。**分数 ≥70 且零密钥告警才能定稿**——低了就补内容，有密钥就脱敏，没有商量余地。
+检查 TODO 残留、必需段落完整性、密钥泄漏（含未加引号的裸值）、引用文件是否存在、交接链闭环（上一份的未了结事项必须带 `done/blocked/moved` 结局，仅"提及"不算），输出 0-100 质量分。**零密钥、零 [TODO] 残留、必需段落完整且分数 ≥70（verdict READY）才能定稿**——报告里还有 [FAIL] 行时，即使分数达标也不算 READY；有密钥就脱敏，没有商量余地。
 
 ### 第 5 步：按档位配置配套件
 
@@ -138,8 +138,8 @@ FRESH → 直接继续；SLIGHTLY_STALE → 先看新提交；STALE/VERY_STALE �
 |---|---|
 | `scripts/create_handoff.py` | 脚手架：预填 git 元数据、按档位生成套件、`--check` 只读预检、`--update-pointer-only` 指针恢复 |
 | `scripts/validate_handoff.py` | 完整性 + 密钥 + 交接链 + 质量分验证 |
-| `scripts/check_staleness.py` | 交接文档新鲜度评级（`--strict` 用退出码区分档位，供 CI 使用） |
-| `scripts/tests/` | 脚本回归测试；改动 `scripts/` 后运行 `python3 -m unittest discover -s scripts/tests` |
+| `scripts/check_staleness.py` | 交接文档新鲜度评级（`--strict` 退出码：0 FRESH / 10 SLIGHTLY_STALE / 20 STALE / 30 VERY_STALE，与故障码 1=文件缺失、2=非 git 仓库/用法错误不重叠，供 CI 使用） |
+| `scripts/tests/` | 脚本回归测试；改动 `scripts/` 后运行 `python3 -m unittest discover -s scripts/tests`（需在 skill 目录内运行，或给 `-s` 绝对路径） |
 | `references/handoff-template.md` | 交接文档模板与填写指引（生成源在 create_handoff.py） |
 | `references/resume-checklist.md` | 接手方核查清单 |
 | `references/agent-mode-matrix.md` | 目标 agent 档位判定详表 |
