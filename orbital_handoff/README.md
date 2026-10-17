@@ -2,7 +2,7 @@
 
 跨隔离 AI agent 的项目交接 skill：让交接套件自己携带足够的上下文，使任何 agent（无论有无 skill 框架）都能零歧义地接手。
 
-**版本**：0.2.2（见仓库根 CHANGELOG.md）
+**版本**：0.2.3（见仓库根 CHANGELOG.md）
 
 ## 安装
 

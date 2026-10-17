@@ -56,7 +56,7 @@ python3 -m unittest discover -s orbital_handoff/scripts/tests -v
 │   ├── README.md                        # 包内说明（安装路径 / 组成 / 安全基线）
 │   ├── references/                      # 档位矩阵 / 交接模板 / 接手核查清单
 │   └── scripts/                         # create / validate / check_staleness
-│       └── tests/                       # 回归测试（unittest，16 项，零依赖）
+│       └── tests/                       # 回归测试（unittest，42 项，零依赖）
 ├── dist/                                # 各版本 .skill 发布包（见下表）
 └── review/                              # 审查产出——仅本地保留，不入库、不随仓库上传
 ```
@@ -68,7 +68,8 @@ python3 -m unittest discover -s orbital_handoff/scripts/tests -v
 | `dist/orbital_handoff.skill` | v0.1 原始包（存档，未改动） |
 | `dist/orbital_handoff-0.2.0.skill` | v0.2.0：按独立审查完成 P0/P1 修复，附 16 项回归测试 |
 | `dist/orbital_handoff-0.2.1.skill` | v0.2.1：交接文档本地-only 政策（自动 gitignore + 跟踪检测） |
-| `dist/orbital_handoff-0.2.2.skill` | v0.2.2：文档整改（**当前版本**） |
+| `dist/orbital_handoff-0.2.2.skill` | v0.2.2：文档整改 |
+| `dist/orbital_handoff-0.2.3.skill` | v0.2.3：第二轮审查安全与健壮性修复（**当前版本**） |
 
 完整变更见 [CHANGELOG.md](CHANGELOG.md)。
 
